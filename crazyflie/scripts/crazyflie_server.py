@@ -215,8 +215,7 @@ class CrazyflieServer(Node):
         self.create_service(Takeoff, "all/takeoff", self._takeoff_callback)
         self.create_service(Land, "all/land", self._land_callback)
         self.create_service(GoTo, "all/go_to", self._go_to_callback)
-        self.create_service(
-            StartTrajectory, "all/start_trajectory", self._start_trajectory_callback)
+        self.create_service(StartTrajectory, "all/start_trajectory", self._start_trajectory_callback)
 
         for uri in self.cf_dict:
             name = self.cf_dict[uri]
@@ -906,6 +905,7 @@ class CrazyflieServer(Node):
         """
 
         poses = msg.poses
+        
         for pose in poses:
             name = pose.name
             x = pose.pose.position.x
@@ -915,7 +915,7 @@ class CrazyflieServer(Node):
 
             if name in self.uri_dict.keys():
                 uri = self.uri_dict[name]
-                # self.get_logger().info(f"{uri}: send extpos {x}, {y}, {z} to {name}")
+                #self.get_logger().info(f"{uri}: send extpos {x}, {y}, {z} to {name}")
                 if isnan(quat.x):
                     self.swarm._cfs[uri].cf.extpos.send_extpos(
                         x, y, z)
@@ -1065,7 +1065,6 @@ class CrazyflieServer(Node):
 
 
 def main(args=None):
-
     cflib.crtp.init_drivers()
     rclpy.init(args=args)
     crazyflie_server = CrazyflieServer()

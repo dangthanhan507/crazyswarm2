@@ -61,7 +61,7 @@ def generate_launch_description():
             name='teleop',
             remappings=[
                 ('takeoff', 'cf231/takeoff'),
-                ('land', 'cf231/land'),
+                ('land', 'cf231s/land'),
                 ('cmd_vel_legacy', 'cf231/cmd_vel_legacy'),
                 ('cmd_full_state', 'cf231/cmd_full_state'),
                 ('notify_setpoints_stop', 'cf231/notify_setpoints_stop'),

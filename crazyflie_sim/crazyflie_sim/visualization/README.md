@@ -71,7 +71,7 @@
           calibration:
             tvec: [0,0,0]
             rvec: [ 0.61394313, -0.61394313,  1.48218982]   # 45 deg tilt
-        cf6:
+        cf231:
           calibration:
             tvec: [0,0,0]
             rvec: [0.0,0.0,1.5707963267948966]    # 90 deg tilt

@@ -23,13 +23,13 @@ if __name__ == '__main__':
 	parser.add_argument(
 		"--stm32Fw",
 		type=str,
-		default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../../../crazyflie-firmware/cf2.bin"),
-		help="Path to cf2.bin")
+		default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../../../crazyflie-firmware/cf231.bin"),
+		help="Path to cf231.bin")
 	parser.add_argument(
 		"--nrf51Fw",
 		type=str,
-		default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../../../crazyflie2-nrf-firmware/cf2_nrf.bin"),
-		help="Path to cf2_nrf.bin")
+		default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "../../../../crazyflie2-nrf-firmware/cf231_nrf.bin"),
+		help="Path to cf231_nrf.bin")
 	args = parser.parse_args()
 
 	if not os.path.exists(args.configpath):
