@@ -10,7 +10,7 @@ import numpy as np
 def main():
     swarm = Crazyswarm()
     timeHelper = swarm.timeHelper
-    allcfs = swarm.allcfs
+    allcfs = swarm.allcfs # list of crazyflies
     trajs = []
     n = 2  # number of distinct trajectories
 

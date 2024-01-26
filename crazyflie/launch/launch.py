@@ -85,11 +85,25 @@ def generate_launch_description():
             name='teleop',
             remappings=[
                 ('emergency', 'all/emergency'),
-                ('takeoff', 'cf6/takeoff'),
-                ('land', 'cf6/land'),
-                ('cmd_vel_legacy', 'cf6/cmd_vel_legacy'),
-                ('cmd_full_state', 'cf6/cmd_full_state'),
-                ('notify_setpoints_stop', 'cf6/notify_setpoints_stop'),
+                ('takeoff', 'cf1/takeoff'),
+                ('land', 'cf1/land'),
+                ('cmd_vel_legacy', 'cf1/cmd_vel_legacy'),
+                ('cmd_full_state', 'cf1/cmd_full_state'),
+                ('notify_setpoints_stop', 'cf1/notify_setpoints_stop'),
+            ],
+            parameters=[teleop_params]
+        ),
+        Node(
+            package='crazyflie',
+            executable='teleop',
+            name='teleop_231',
+            remappings=[
+                ('emergency', 'all/emergency'),
+                ('takeoff', 'cf231/takeoff'),
+                ('land', 'cf231/land'),
+                ('cmd_vel_legacy', 'cf231/cmd_vel_legacy'),
+                ('cmd_full_state', 'cf231/cmd_full_state'),
+                ('notify_setpoints_stop', 'cf231/notify_setpoints_stop'),
             ],
             parameters=[teleop_params]
         ),

@@ -1,37 +1,67 @@
 # named list of all robots
 robots:
+  cf1:
+    enabled: false
+    uri: radio://0/80/250K/E7E7E7E7E7
+    initial_position: [-0.577, 0.60, 0.02]
+    type: cf21_mocap_deck    # see robot_types
+    firmware_params:
+      kalman:
+        pNAcc_xy: 1.0 # default 0.5
+    firmware_logging:
+      enabled: false
+      custom_topics:
+        topic_name3:
+          frequency: 1
+          vars: [acc.x, acc.y]
   cf231:
     enabled: true
-    uri: radio://0/80/2M/E7E7E7E7E7
-    initial_position: [0, 0, 0]
-    type: cf21  # see robot_types
-    # firmware_params:
-    #   kalman:
-    #     pNAcc_xy: 1.0 # default 0.5
-    # firmware_logging:
-    #   enabled: true
-    #   custom_topics:
-    #     topic_name3: 
-    #       frequency: 1
-    #       vars: ["acc.x", "acc.y"]
-  cf5:
-    enabled: false
-    uri: radio://0/80/2M/E7E7E7E705
-    initial_position: [0, -0.5, 0]
-    type: cf21  # see robot_types
-    # firmware_params:
-    #   kalman:
-    #     pNAcc_xy: 1.0 # default 0.5
-    #firmware_logging:
-    #  custom_topics:
-    #    topic_name3: 
-    #      frequency: 1
-    #      vars: ["acc.x", "acc.y", "acc.z"]
-# Definition of the various robot types
+    uri: radio://0/5/250K/E7E7E7E7E7
+    initial_position: [-1.777, 0.60, 0.02]
+    type: cf21_mocap_deck    # see robot_types
+    firmware_params:
+      kalman:
+        pNAcc_xy: 1.0 # default 0.5
+    firmware_logging:
+      enabled: true
+      custom_topics:
+        topic_name3:
+          frequency: 1
+          vars: [acc.x, acc.y]
+
+##########################################
+#   cf2311:
+#     enabled: false
+#     uri: radio://0/80/250K/E7E7E7E7E8
+#     initial_position: [0, 0, 0]
+#     type: cf21  # see robot_types
+#     # firmware_params:
+#     #   kalman:
+#     #     pNAcc_xy: 1.0 # default 0.5
+#     # firmware_logging:
+#     #   enabled: true
+#     #   custom_topics:
+#     #     topic_name3: 
+#     #       frequency: 1
+#     #       vars: ["acc.x", "acc.y"]
+#   cf5:
+#     enabled: false
+#     uri: radio://0/80/2M/E7E7E7E705
+#     initial_position: [0, -0.5, 0]
+#     type: cf21  # see robot_types
+#     # firmware_params:
+#     #   kalman:
+#     #     pNAcc_xy: 1.0 # default 0.5
+#     #firmware_logging:
+#     #  custom_topics:
+#     #    topic_name3: 
+#     #      frequency: 1
+#     #      vars: ["acc.x", "acc.y", "acc.z"]
+# # Definition of the various robot types
 robot_types:
   cf21:
     motion_capture:
-      enabled: true
+      enabled: false
       # only if enabled; see motion_capture.yaml
       marker: default_single_marker
       dynamics: default
@@ -77,12 +107,10 @@ all:
      # remove to disable default topic
       pose:
         frequency: 10 # Hz
-      status:
-        frequency: 1 # Hz
-    #custom_topics:
-    #  topic_name1:
-    #    frequency: 10 # Hz
-    #    vars: ["stateEstimateZ.x", "stateEstimateZ.y", "stateEstimateZ.z", "pm.vbat"]
+    custom_topics:
+     topic_name1:
+       frequency: 10 # Hz
+       vars: ["stateEstimateZ.x", "stateEstimateZ.y", "stateEstimateZ.z", "pm.vbat"]
     #  topic_name2:
     #    frequency: 1 # Hz
     #    vars: ["stabilizer.roll", "stabilizer.pitch", "stabilizer.yaw"]
