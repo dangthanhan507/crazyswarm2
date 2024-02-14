@@ -110,7 +110,7 @@ all:
     custom_topics:
      topic_name1:
        frequency: 10 # Hz
-       vars: ["stateEstimateZ.x", "stateEstimateZ.y", "stateEstimateZ.z", "pm.vbat"]
+       vars: ["stateEstimateZ.x", "stateEstimateZ.y", "stateEstimateZ.z", "pm.vbat", "motor.m1", "motor.m2", "motor.m3", "motor.m4"]
     #  topic_name2:
     #    frequency: 1 # Hz
     #    vars: ["stabilizer.roll", "stabilizer.pitch", "stabilizer.yaw"]

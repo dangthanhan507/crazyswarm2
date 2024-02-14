@@ -3,7 +3,7 @@
 from crazyflie_py import Crazyswarm
 import numpy as np
 
-TAKEOFF_DURATION = 2.5
+TAKEOFF_DURATION = 5.0
 HOVER_DURATION = 10.0
 import numpy as np
 
@@ -16,14 +16,15 @@ def main():
 
     cf.takeoff(targetHeight=1.0, duration=TAKEOFF_DURATION)
     # cf1.takeoff(targetHeight=1.0, duration=TAKEOFF_DURATION)
-    timeHelper.sleep(TAKEOFF_DURATION+5.0)
-    pos = np.array(cf.initialPosition) + np.array([0.5, 0.0, 1.0])
-    cf.goTo(pos, 0, 3.0)
-    timeHelper.sleep(10.0)
     
-    pos = np.array(cf.initialPosition) + np.array([-0.5, 0.0, 1.0])
-    cf.goTo(pos, 0, 3.0)
-    timeHelper.sleep(10.0)
+    # timeHelper.sleep(TAKEOFF_DURATION+5.0)
+    # pos = np.array(cf.initialPosition) + np.array([0.5, 0.0, 1.0])
+    # cf.goTo(pos, 0, 3.0)
+    # timeHelper.sleep(10.0)
+    
+    # pos = np.array(cf.initialPosition) + np.array([-0.5, 0.0, 1.0])
+    # cf.goTo(pos, 0, 3.0)
+    # timeHelper.sleep(10.0)
     
     timeHelper.sleep(TAKEOFF_DURATION + HOVER_DURATION)
     cf.land(targetHeight=0.04, duration=5)
