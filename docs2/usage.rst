@@ -19,6 +19,11 @@ Usage
     .. code-block:: bash
 
         export ROS_LOCALHOST_ONLY=1
+        export ROS_DOMAIN_ID=<unique number between 0 and 101>
+
+    The first environment variable restricts ROS to your local machine. The second is useful
+    if you have multiple user accounts on the same machine (e.g., a shared workstation computer).
+    In such case, each user should use a unique `domain ID <https://docs.ros.org/en/iron/Concepts/Intermediate/About-Domain-ID.html>`_.
 
 
 Configuration
@@ -150,3 +155,11 @@ You may run the script multiple times or different scripts while leaving the ser
 
     [terminal1]$ ros2 launch crazyflie launch.py
     [terminal2]$ ros2 run crazyflie_examples hello_world
+
+Swarm Management
+----------------
+
+The launch file will also start a swarm management tool that is a ROS node and web-based GUI.
+In the upper pane is the location of the drone visualized in a 3D window, similar to rviz.
+In the lower pane, the status as well as log messages are visible (tabbed per drone).
+In the future, we are planning to add support for rebooting and other actions.

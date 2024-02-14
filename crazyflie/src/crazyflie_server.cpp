@@ -12,6 +12,7 @@
 #include "crazyflie_interfaces/srv/land.hpp"
 #include "crazyflie_interfaces/srv/go_to.hpp"
 #include "crazyflie_interfaces/srv/notify_setpoints_stop.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
@@ -20,6 +21,7 @@
 #include "motion_capture_tracking_interfaces/msg/named_pose_array.hpp"
 #include "crazyflie_interfaces/msg/full_state.hpp"
 #include "crazyflie_interfaces/msg/position.hpp"
+#include "crazyflie_interfaces/msg/status.hpp"
 #include "crazyflie_interfaces/msg/log_data_generic.hpp"
 #include "crazyflie_interfaces/msg/connection_statistics_array.hpp"
 
@@ -37,13 +39,19 @@ using std_srvs::srv::Empty;
 using motion_capture_tracking_interfaces::msg::NamedPoseArray;
 using crazyflie_interfaces::msg::FullState;
 
+// Note on logging: we use a single logger with string prefixes
+// A better way would be to use named child loggers, but these do not
+// report to /rosout in humble, see https://github.com/ros2/rclpy/issues/1131
+// Once we do not support humble anymore, consider switching to child loggers
+
 // Helper class to convert crazyflie_cpp logging messages to ROS logging messages
 class CrazyflieLogger : public Logger
 {
 public:
-  CrazyflieLogger(rclcpp::Logger logger)
+  CrazyflieLogger(rclcpp::Logger logger, const std::string& prefix)
       : Logger()
       , logger_(logger)
+      , prefix_(prefix)
   {
   }
 
@@ -51,20 +59,21 @@ public:
 
   virtual void info(const std::string &msg)
   {
-    RCLCPP_INFO(logger_, "%s", msg.c_str());
+    RCLCPP_INFO(logger_, "%s %s", prefix_.c_str(), msg.c_str());
   }
 
   virtual void warning(const std::string &msg)
   {
-    RCLCPP_WARN(logger_, "%s", msg.c_str());
+    RCLCPP_WARN(logger_, "%s %s", prefix_.c_str(),  msg.c_str());
   }
 
   virtual void error(const std::string &msg)
   {
-    RCLCPP_ERROR(logger_, "%s", msg.c_str());
+    RCLCPP_ERROR(logger_, "%s %s", prefix_.c_str(), msg.c_str());
   }
 private:
   rclcpp::Logger logger_;
+  std::string prefix_;
 };
 
 std::set<std::string> extract_names(
@@ -102,6 +111,21 @@ private:
     uint16_t right;
   } __attribute__((packed));
 
+  struct logStatus {
+    // general status
+    uint16_t supervisorInfo; // supervisor.info
+    // battery related
+    // Note that using BQ-deck/Bolt one can actually have two batteries at the same time.
+    // vbat refers to the battery directly connected to the CF board and might not reflect
+    // the "external" battery on BQ/Bolt builds
+    uint16_t vbatMV;  // pm.vbatMV
+    uint8_t pmState;  // pm.state
+    // radio related
+    uint8_t rssi;     // radio.rssi
+    uint16_t numRxBc; // radio.numRxBc
+    uint16_t numRxUc; // radio.numRxUc
+  } __attribute__((packed));
+
 public:
   CrazyflieROS(
     const std::string& link_uri,
@@ -110,9 +134,10 @@ public:
     rclcpp::Node* node,
     rclcpp::CallbackGroup::SharedPtr callback_group_cf_cmd,
     rclcpp::CallbackGroup::SharedPtr callback_group_cf_srv,
+    const CrazyflieBroadcaster* cfbc,
     bool enable_parameters = true)
-    : logger_(rclcpp::get_logger(name))
-    , cf_logger_(logger_)
+    : logger_(node->get_logger())
+    , cf_logger_(logger_, "[" + name + "]")
     , cf_(
       link_uri,
       cf_logger_,
@@ -121,6 +146,7 @@ public:
     , node_(node)
     , tf_broadcaster_(node)
     , last_on_latency_(std::chrono::steady_clock::now())
+    , cfbc_(cfbc)
   {
     auto sub_opt_cf_cmd = rclcpp::SubscriptionOptions();
     sub_opt_cf_cmd.callback_group = callback_group_cf_cmd;
@@ -142,6 +168,15 @@ public:
     subscription_cmd_full_state_ = node->create_subscription<crazyflie_interfaces::msg::FullState>(name + "/cmd_full_state", rclcpp::SystemDefaultsQoS(), std::bind(&CrazyflieROS::cmd_full_state_changed, this, _1), sub_opt_cf_cmd);
     subscription_cmd_position_ = node->create_subscription<crazyflie_interfaces::msg::Position>(name + "/cmd_position", rclcpp::SystemDefaultsQoS(), std::bind(&CrazyflieROS::cmd_position_changed, this, _1), sub_opt_cf_cmd);
 
+    publisher_robot_description_ = node->create_publisher<std_msgs::msg::String>(name + "/robot_description",
+      rclcpp::QoS(1).transient_local());
+    {
+      auto msg = std::make_unique<std_msgs::msg::String>();
+      auto robot_desc = node->get_parameter("robot_description").get_parameter_value().get<std::string>();
+      msg->data = std::regex_replace(robot_desc, std::regex("\\$NAME"), name);
+      publisher_robot_description_->publish(std::move(msg));
+    }
+
     // spinning timer
     // used to process all incoming radio messages
     spin_timer_ =
@@ -153,6 +188,8 @@ public:
     warning_freq_ = node->get_parameter("warnings.frequency").get_parameter_value().get<float>();
     max_latency_ = node->get_parameter("warnings.communication.max_unicast_latency").get_parameter_value().get<float>();
     min_ack_rate_ = node->get_parameter("warnings.communication.min_unicast_ack_rate").get_parameter_value().get<float>();
+    min_unicast_receive_rate_ = node->get_parameter("warnings.communication.min_unicast_receive_rate").get_parameter_value().get<float>();
+    min_broadcast_receive_rate_ = node->get_parameter("warnings.communication.min_broadcast_receive_rate").get_parameter_value().get<float>();
     publish_stats_ = node->get_parameter("warnings.communication.publish_stats").get_parameter_value().get<bool>();
     if (publish_stats_) {
       publisher_connection_stats_ = node->create_publisher<crazyflie_interfaces::msg::ConnectionStatisticsArray>(name + "/connection_statistics", 10);
@@ -200,7 +237,7 @@ public:
       bool query_all_values_on_connect = node->get_parameter("firmware_params.query_all_values_on_connect").get_parameter_value().get<bool>();
 
       int numParams = 0;
-      RCLCPP_INFO(logger_, "Requesting parameters...");
+      RCLCPP_INFO(logger_, "[%s] Requesting parameters...", name_.c_str());
       cf_.requestParamToc(/*forceNoCache*/false, /*requestValues*/query_all_values_on_connect);
       for (auto iter = cf_.paramsBegin(); iter != cf_.paramsEnd(); ++iter) {
         auto entry = *iter;
@@ -257,7 +294,7 @@ public:
           }
           break;
         default:
-          RCLCPP_WARN(logger_, "Unknown param type for %s/%s", entry.group.c_str(), entry.name.c_str());
+          RCLCPP_WARN(logger_, "[%s] Unknown param type for %s/%s", name_.c_str(), entry.group.c_str(), entry.name.c_str());
           break;
         }
         // If there is no such parameter in all, add it
@@ -273,7 +310,7 @@ public:
       }
       auto end1 = std::chrono::system_clock::now();
       std::chrono::duration<double> elapsedSeconds1 = end1 - start;
-      RCLCPP_INFO(logger_, "reqParamTOC: %f s (%d params)", elapsedSeconds1.count(), numParams);
+      RCLCPP_INFO(logger_, "[%s] reqParamTOC: %f s (%d params)", name_.c_str(), elapsedSeconds1.count(), numParams);
       
       // Set parameters as specified in the configuration files, as in the following order
       // 1.) check all/firmware_params
@@ -323,7 +360,7 @@ public:
           // check if any of the default topics are enabled
           if (i.first.find("default_topics.pose") == 0) {
             int freq = log_config_map["default_topics.pose.frequency"].get<int>();
-            RCLCPP_INFO(logger_, "Logging to /pose at %d Hz", freq);
+            RCLCPP_INFO(logger_, "[%s] Logging to /pose at %d Hz", name_.c_str(), freq);
 
             publisher_pose_ = node->create_publisher<geometry_msgs::msg::PoseStamped>(name + "/pose", 10);
 
@@ -340,7 +377,7 @@ public:
           }
           else if (i.first.find("default_topics.scan") == 0) {
             int freq = log_config_map["default_topics.scan.frequency"].get<int>();
-            RCLCPP_INFO(logger_, "Logging to /scan at %d Hz", freq);
+            RCLCPP_INFO(logger_, "[%s] Logging to /scan at %d Hz", name_.c_str(), freq);
 
             publisher_scan_ = node->create_publisher<sensor_msgs::msg::LaserScan>(name + "/scan", 10);
 
@@ -355,6 +392,47 @@ public:
               }, cb));
             log_block_scan_->start(uint8_t(100.0f / (float)freq)); // this is in tens of milliseconds
           }
+          else if (i.first.find("default_topics.status") == 0) {
+            int freq = log_config_map["default_topics.status.frequency"].get<int>();
+            RCLCPP_INFO(logger_, "[%s] Logging to /status at %d Hz", name_.c_str(), freq);
+
+            publisher_status_ = node->create_publisher<crazyflie_interfaces::msg::Status>(name + "/status", 10);
+
+            std::function<void(uint32_t, const logStatus*)> cb = std::bind(&CrazyflieROS::on_logging_status, this, std::placeholders::_1, std::placeholders::_2);
+
+            std::list<std::pair<std::string, std::string> > logvars({
+              // general status
+              {"supervisor", "info"},
+              // battery related
+              {"pm", "vbatMV"},
+              {"pm", "state"},
+              // radio related
+              {"radio", "rssi"}
+            });
+
+            // check if this firmware version has radio.numRx{Bc,Uc}
+            status_has_radio_stats_ = false;
+            for (auto iter = cf_.logVariablesBegin(); iter != cf_.logVariablesEnd(); ++iter) {
+              auto entry = *iter;
+              if (entry.group == "radio" && entry.name == "numRxBc") {
+                logvars.push_back({"radio", "numRxBc"});
+                logvars.push_back({"radio", "numRxUc"});
+                status_has_radio_stats_ = true;
+                break;
+              }
+            }
+
+            // older firmware -> use other 16-bit variables
+            if (!status_has_radio_stats_) {
+                RCLCPP_WARN(logger_, "[%s] Older firmware. status/num_rx_broadcast and status/num_rx_unicast are set to zero.", name_.c_str());
+                logvars.push_back({"pm", "vbatMV"});
+                logvars.push_back({"pm", "vbatMV"});
+            }
+
+            log_block_status_.reset(new LogBlock<logStatus>(
+              &cf_,logvars, cb));
+            log_block_status_->start(uint8_t(100.0f / (float)freq)); // this is in tens of milliseconds
+          }
           else if (i.first.find("custom_topics") == 0
                    && i.first.rfind(".vars") != std::string::npos) {
             std::string topic_name = i.first.substr(14, i.first.size() - 14 - 5);
@@ -362,7 +440,7 @@ public:
             int freq = log_config_map["custom_topics." + topic_name + ".frequency"].get<int>();
             auto vars = log_config_map["custom_topics." + topic_name + ".vars"].get<std::vector<std::string>>();
             
-            RCLCPP_INFO(logger_, "Logging to %s at %d Hz", topic_name.c_str(), freq);
+            RCLCPP_INFO(logger_, "[%s] Logging to %s at %d Hz", name_.c_str(), topic_name.c_str(), freq);
 
             publishers_generic_.emplace_back(node->create_publisher<crazyflie_interfaces::msg::LogDataGeneric>(name + "/" + topic_name, 10));
 
@@ -384,7 +462,7 @@ public:
       }
     }
 
-    RCLCPP_INFO(logger_, "Requesting memories...");
+    RCLCPP_INFO(logger_, "[%s] Requesting memories...", name_.c_str());
     cf_.requestMemoryToc();
   }
 
@@ -420,7 +498,7 @@ public:
     if (p.get_name().find(prefix) != 0) {
       RCLCPP_ERROR(
               logger_,
-              "Incorrect parameter update request for param \"%s\"", p.get_name().c_str());
+              "[%s] Incorrect parameter update request for param \"%s\"", name_.c_str(), p.get_name().c_str());
       return;
     }
     size_t pos = p.get_name().find(".", prefix.size());
@@ -429,7 +507,8 @@ public:
 
     RCLCPP_INFO(
         logger_,
-        "Update parameter \"%s.%s\" to %s",
+        "[%s] Update parameter \"%s.%s\" to %s",
+        name_.c_str(),
         group.c_str(),
         name.c_str(),
         p.value_to_string().c_str());
@@ -466,7 +545,7 @@ public:
         break;
       }
     } else {
-      RCLCPP_ERROR(logger_, "Could not find param %s/%s", group.c_str(), name.c_str());
+      RCLCPP_ERROR(logger_, "[%s] Could not find param %s/%s", name_.c_str(), group.c_str(), name.c_str());
     }
   }
 
@@ -525,7 +604,7 @@ private:
     if (pos != std::string::npos)
     {
       message_buffer_[pos] = 0;
-      RCLCPP_INFO(logger_, "%s", message_buffer_.c_str());
+      RCLCPP_INFO(logger_, "[%s] %s", name_.c_str(), message_buffer_.c_str());
       message_buffer_.erase(0, pos + 1);
     }
   }
@@ -533,14 +612,15 @@ private:
   void emergency(const std::shared_ptr<Empty::Request> request,
             std::shared_ptr<Empty::Response> response)
   {
-    RCLCPP_INFO(logger_, "emergency()");
+    RCLCPP_INFO(logger_, "[%s] emergency()", name_.c_str());
     cf_.emergencyStop();
   }
 
   void start_trajectory(const std::shared_ptr<StartTrajectory::Request> request,
                         std::shared_ptr<StartTrajectory::Response> response)
   {
-    RCLCPP_INFO(logger_, "start_trajectory(id=%d, timescale=%f, reversed=%d, relative=%d, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[%s] start_trajectory(id=%d, timescale=%f, reversed=%d, relative=%d, group_mask=%d)",
+      name_.c_str(),
       request->trajectory_id,
       request->timescale,
       request->reversed,
@@ -556,7 +636,8 @@ private:
   void takeoff(const std::shared_ptr<Takeoff::Request> request,
                std::shared_ptr<Takeoff::Response> response)
   {
-    RCLCPP_INFO(logger_, "takeoff(height=%f m, duration=%f s, group_mask=%d)", 
+    RCLCPP_INFO(logger_, "[%s] takeoff(height=%f m, duration=%f s, group_mask=%d)", 
+                name_.c_str(),
                 request->height,
                 rclcpp::Duration(request->duration).seconds(),
                 request->group_mask);
@@ -566,7 +647,8 @@ private:
   void land(const std::shared_ptr<Land::Request> request,
             std::shared_ptr<Land::Response> response)
   {
-    RCLCPP_INFO(logger_, "land(height=%f m, duration=%f s, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[%s] land(height=%f m, duration=%f s, group_mask=%d)",
+                name_.c_str(),
                 request->height,
                 rclcpp::Duration(request->duration).seconds(),
                 request->group_mask);
@@ -576,7 +658,8 @@ private:
   void go_to(const std::shared_ptr<GoTo::Request> request,
              std::shared_ptr<GoTo::Response> response)
   {
-    RCLCPP_INFO(logger_, "go_to(position=%f,%f,%f m, yaw=%f rad, duration=%f s, relative=%d, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[%s] go_to(position=%f,%f,%f m, yaw=%f rad, duration=%f s, relative=%d, group_mask=%d)",
+                name_.c_str(),
                 request->goal.x, request->goal.y, request->goal.z, request->yaw,
                 rclcpp::Duration(request->duration).seconds(),
                 request->relative,
@@ -589,7 +672,8 @@ private:
   void upload_trajectory(const std::shared_ptr<UploadTrajectory::Request> request,
                         std::shared_ptr<UploadTrajectory::Response> response)
   {
-    RCLCPP_INFO(logger_, "upload_trajectory(id=%d, offset=%d)",
+    RCLCPP_INFO(logger_, "[%s] upload_trajectory(id=%d, offset=%d)",
+                name_.c_str(),
                 request->trajectory_id,
                 request->piece_offset);
 
@@ -601,7 +685,7 @@ private:
           || request->pieces[i].poly_z.size() != 8
           || request->pieces[i].poly_yaw.size() != 8)
       {
-        RCLCPP_FATAL(logger_, "Wrong number of pieces!");
+        RCLCPP_FATAL(logger_, "[%s] Wrong number of pieces!", name_.c_str());
         return;
       }
       pieces[i].duration = rclcpp::Duration(request->pieces[i].duration).seconds();
@@ -619,7 +703,8 @@ private:
   void notify_setpoints_stop(const std::shared_ptr<NotifySetpointsStop::Request> request,
                          std::shared_ptr<NotifySetpointsStop::Response> response)
   {
-    RCLCPP_INFO(logger_, "notify_setpoints_stop(remain_valid_millisecs%d, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[%s] notify_setpoints_stop(remain_valid_millisecs%d, group_mask=%d)",
+                name_.c_str(),
                 request->remain_valid_millisecs,
                 request->group_mask);
 
@@ -690,6 +775,72 @@ private:
     }
   }
 
+  void on_logging_status(uint32_t time_in_ms, const logStatus* data) {
+    if (publisher_status_) {
+      
+      crazyflie_interfaces::msg::Status msg;
+      msg.header.stamp = node_->get_clock()->now();
+      msg.header.frame_id = name_;
+      msg.supervisor_info = data->supervisorInfo;
+      msg.battery_voltage = data->vbatMV / 1000.0f;
+      msg.pm_state = data->pmState;
+      msg.rssi = data->rssi;
+      if (status_has_radio_stats_) {
+        int32_t deltaRxBc = data->numRxBc - previous_numRxBc;
+        int32_t deltaRxUc = data->numRxUc - previous_numRxUc;
+        // handle overflow
+        if (deltaRxBc < 0) {
+          deltaRxBc += std::numeric_limits<uint16_t>::max();
+        }
+        if (deltaRxUc < 0) {
+          deltaRxUc += std::numeric_limits<uint16_t>::max();
+        }
+        msg.num_rx_broadcast = deltaRxBc;
+        msg.num_rx_unicast = deltaRxUc;
+        previous_numRxBc = data->numRxBc;
+        previous_numRxUc = data->numRxUc;
+      } else {
+        msg.num_rx_broadcast = 0;
+        msg.num_rx_unicast = 0;
+      }
+
+      // connection sent stats (unicast)
+      const auto statsUc = cf_.connectionStats();
+      size_t deltaTxUc = statsUc.sent_count - previous_stats_unicast_.sent_count;
+      msg.num_tx_unicast = deltaTxUc;
+      previous_stats_unicast_ = statsUc;
+
+      // connection sent stats (broadcast)
+      const auto statsBc = cfbc_->connectionStats();
+      size_t deltaTxBc = statsBc.sent_count - previous_stats_broadcast_.sent_count;
+      msg.num_tx_broadcast = deltaTxBc;
+      previous_stats_broadcast_ = statsBc;
+
+      publisher_status_->publish(msg);
+
+      // warnings
+      if (msg.num_rx_unicast > msg.num_tx_unicast) {
+        RCLCPP_WARN(logger_, "Unexpected number of unicast packets. Sent: %d. Received: %d", msg.num_tx_unicast, msg.num_rx_unicast);
+      }
+      if (msg.num_tx_unicast > 0) {
+        float unicast_receive_rate = msg.num_rx_unicast / (float)msg.num_tx_unicast;
+        if (unicast_receive_rate < min_unicast_receive_rate_) {
+          RCLCPP_WARN(logger_, "Low unicast receive rate (%.2f < %.2f). Sent: %d. Received: %d", unicast_receive_rate, min_unicast_receive_rate_, msg.num_tx_unicast, msg.num_rx_unicast);
+        }
+      }
+
+      if (msg.num_rx_broadcast > msg.num_tx_broadcast) {
+        RCLCPP_WARN(logger_, "Unexpected number of broadcast packets. Sent: %d. Received: %d", msg.num_tx_broadcast, msg.num_rx_broadcast);
+      }
+      if (msg.num_tx_broadcast > 0) {
+        float broadcast_receive_rate = msg.num_rx_broadcast / (float)msg.num_tx_broadcast;
+        if (broadcast_receive_rate < min_broadcast_receive_rate_) {
+          RCLCPP_WARN(logger_, "Low broadcast receive rate (%.2f < %.2f). Sent: %d. Received: %d", broadcast_receive_rate, min_broadcast_receive_rate_, msg.num_tx_broadcast, msg.num_rx_broadcast);
+        }
+      }
+    }
+  }
+
   void on_logging_custom(uint32_t time_in_ms, const std::vector<float>* values, void* userData) {
 
     auto pub = reinterpret_cast<rclcpp::Publisher<crazyflie_interfaces::msg::LogDataGeneric>::SharedPtr*>(userData);
@@ -710,13 +861,13 @@ private:
     auto now = std::chrono::steady_clock::now();
     std::chrono::duration<double> elapsed = now - last_on_latency_;
     if (elapsed.count() > 1.0 / warning_freq_) {
-      RCLCPP_WARN(logger_, "last latency update: %f s", elapsed.count());
+      RCLCPP_WARN(logger_, "[%s] last latency update: %f s", name_.c_str(), elapsed.count());
     }
 
     auto stats = cf_.connectionStatsDelta();
     float ack_rate = stats.sent_count / stats.ack_count;
     if (ack_rate < min_ack_rate_) {
-      RCLCPP_WARN(logger_, "Ack rate: %.1f %%", ack_rate * 100);
+      RCLCPP_WARN(logger_, "[%s] Ack rate: %.1f %%", name_.c_str(), ack_rate * 100);
     }
 
     if (publish_stats_) {
@@ -739,7 +890,7 @@ private:
   void on_latency(uint64_t latency_in_us)
   {
     if (latency_in_us / 1000.0 > max_latency_) {
-      RCLCPP_WARN(logger_, "Latency: %.1f ms", latency_in_us / 1000.0);
+      RCLCPP_WARN(logger_, "[%s] Latency: %.1f ms", name_.c_str(), latency_in_us / 1000.0);
     }
     last_on_latency_ = std::chrono::steady_clock::now();
   }
@@ -767,12 +918,23 @@ private:
   rclcpp::Subscription<crazyflie_interfaces::msg::FullState>::SharedPtr subscription_cmd_full_state_;
   rclcpp::Subscription<crazyflie_interfaces::msg::Position>::SharedPtr subscription_cmd_position_;
 
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_robot_description_;
+
   // logging
   std::unique_ptr<LogBlock<logPose>> log_block_pose_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr publisher_pose_;
 
   std::unique_ptr<LogBlock<logScan>> log_block_scan_;
   rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr publisher_scan_;
+
+  std::unique_ptr<LogBlock<logStatus>> log_block_status_;
+  bool status_has_radio_stats_;
+  rclcpp::Publisher<crazyflie_interfaces::msg::Status>::SharedPtr publisher_status_;
+  uint16_t previous_numRxBc;
+  uint16_t previous_numRxUc;
+  bitcraze::crazyflieLinkCpp::Connection::Statistics previous_stats_unicast_;
+  bitcraze::crazyflieLinkCpp::Connection::Statistics previous_stats_broadcast_;
+  const CrazyflieBroadcaster* cfbc_;
 
   std::list<std::unique_ptr<LogBlockGeneric>> log_blocks_generic_;
   std::list<rclcpp::Publisher<crazyflie_interfaces::msg::LogDataGeneric>::SharedPtr> publishers_generic_;
@@ -787,6 +949,8 @@ private:
   float warning_freq_;
   float max_latency_;
   float min_ack_rate_;
+  float min_unicast_receive_rate_;
+  float min_broadcast_receive_rate_;
   bool publish_stats_;
   rclcpp::Publisher<crazyflie_interfaces::msg::ConnectionStatisticsArray>::SharedPtr publisher_connection_stats_;
 };
@@ -796,7 +960,7 @@ class CrazyflieServer : public rclcpp::Node
 public:
   CrazyflieServer()
       : Node("crazyflie_server")
-      , logger_(rclcpp::get_logger("all"))
+      , logger_(get_logger())
   {
     // Create callback groups (each group can run in a separate thread)
     callback_group_mocap_ = this->create_callback_group(
@@ -840,6 +1004,8 @@ public:
     broadcasts_delay_between_repeats_ms_ = this->get_parameter("all.broadcasts.delay_between_repeats_ms").get_parameter_value().get<int>();
     mocap_enabled_ = false;
 
+    this->declare_parameter("robot_description", "");
+
     // Warnings
     this->declare_parameter("warnings.frequency", 1.0);
     float freq = this->get_parameter("warnings.frequency").get_parameter_value().get<float>();
@@ -853,6 +1019,8 @@ public:
 
     this->declare_parameter("warnings.communication.max_unicast_latency", 10.0);
     this->declare_parameter("warnings.communication.min_unicast_ack_rate", 0.9);
+    this->declare_parameter("warnings.communication.min_unicast_receive_rate", 0.9);
+    this->declare_parameter("warnings.communication.min_broadcast_receive_rate", 0.9);
     this->declare_parameter("warnings.communication.publish_stats", false);
 
     publish_stats_ = this->get_parameter("warnings.communication.publish_stats").get_parameter_value().get<bool>();
@@ -888,19 +1056,19 @@ public:
         // if it is a Crazyflie, try to connect
         if (constr == "crazyflie") {
           std::string uri = parameter_overrides.at("robots." + name + ".uri").get<std::string>();
+          auto broadcastUri = Crazyflie::broadcastUriFromUnicastUri(uri);
+          if (broadcaster_.count(broadcastUri) == 0) {
+            broadcaster_.emplace(broadcastUri, std::make_unique<CrazyflieBroadcaster>(broadcastUri));
+          }
+
           crazyflies_.emplace(name, std::make_unique<CrazyflieROS>(
             uri,
             cf_type,
             name,
             this,
             callback_group_cf_cmd_,
-            callback_group_cf_srv_));
-
-          auto broadcastUri = crazyflies_[name]->broadcastUri();
-          RCLCPP_INFO(logger_, "%s", broadcastUri.c_str());
-          if (broadcaster_.count(broadcastUri) == 0) {
-            broadcaster_.emplace(broadcastUri, std::make_unique<CrazyflieBroadcaster>(broadcastUri));
-          }
+            callback_group_cf_srv_,
+            broadcaster_.at(broadcastUri).get()));
 
           update_name_to_id_map(name, crazyflies_[name]->id());
         }
@@ -909,7 +1077,7 @@ public:
           uint8_t id = parameter_overrides.at("robots." + name + ".id").get<uint8_t>();
           update_name_to_id_map(name, id);
         } else {
-          RCLCPP_INFO(logger_, "Unknown connection type %s", constr.c_str());
+          RCLCPP_INFO(logger_, "[all] Unknown connection type %s", constr.c_str());
         }
       }
     }
@@ -936,7 +1104,7 @@ private:
   void emergency(const std::shared_ptr<Empty::Request> request,
             std::shared_ptr<Empty::Response> response)
   {
-    RCLCPP_INFO(logger_, "emergency()");
+    RCLCPP_INFO(logger_, "[all] emergency()");
     for (int i = 0; i < broadcasts_num_repeats_; ++i)
     {
       for (auto &bc : broadcaster_) {
@@ -950,7 +1118,7 @@ private:
   void start_trajectory(const std::shared_ptr<StartTrajectory::Request> request,
             std::shared_ptr<StartTrajectory::Response> response)
   {
-    RCLCPP_INFO(logger_, "start_trajectory(id=%d, timescale=%f, reversed=%d, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[all] start_trajectory(id=%d, timescale=%f, reversed=%d, group_mask=%d)",
                 request->trajectory_id,
                 request->timescale,
                 request->reversed,
@@ -970,7 +1138,7 @@ private:
   void takeoff(const std::shared_ptr<Takeoff::Request> request,
                         std::shared_ptr<Takeoff::Response> response)
   {
-    RCLCPP_INFO(logger_, "takeoff(height=%f m, duration=%f s, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[all] takeoff(height=%f m, duration=%f s, group_mask=%d)",
                 request->height,
                 rclcpp::Duration(request->duration).seconds(),
                 request->group_mask);
@@ -986,7 +1154,7 @@ private:
   void land(const std::shared_ptr<Land::Request> request,
            std::shared_ptr<Land::Response> response)
   {
-    RCLCPP_INFO(logger_, "land(height=%f m, duration=%f s, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[all] land(height=%f m, duration=%f s, group_mask=%d)",
                 request->height,
                 rclcpp::Duration(request->duration).seconds(),
                 request->group_mask);
@@ -1002,7 +1170,7 @@ private:
   void go_to(const std::shared_ptr<GoTo::Request> request,
             std::shared_ptr<GoTo::Response> response)
   {
-    RCLCPP_INFO(logger_, "go_to(position=%f,%f,%f m, yaw=%f rad, duration=%f s, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[all] go_to(position=%f,%f,%f m, yaw=%f rad, duration=%f s, group_mask=%d)",
                 request->goal.x, request->goal.y, request->goal.z, request->yaw,
                 rclcpp::Duration(request->duration).seconds(),
                 request->group_mask);
@@ -1020,7 +1188,7 @@ private:
   void notify_setpoints_stop(const std::shared_ptr<NotifySetpointsStop::Request> request,
                          std::shared_ptr<NotifySetpointsStop::Response> response)
   {
-    RCLCPP_INFO(logger_, "notify_setpoints_stop(remain_valid_millisecs%d, group_mask=%d)",
+    RCLCPP_INFO(logger_, "[all] notify_setpoints_stop(remain_valid_millisecs%d, group_mask=%d)",
                 request->remain_valid_millisecs,
                 request->group_mask);
 
@@ -1127,7 +1295,7 @@ private:
 
           RCLCPP_INFO(
               logger_,
-              "Update parameter \"%s.%s\" to %s",
+              "[all] Update parameter \"%s.%s\" to %s",
               group.c_str(),
               name.c_str(),
               p.value_to_string().c_str());
@@ -1197,11 +1365,11 @@ private:
       mean_rate /= (mocap_data_received_timepoints_.size() - 1);
 
       if (num_rates_wrong > 0) {
-        RCLCPP_WARN(logger_, "Motion capture rate off (#: %d, Avg: %.1f)", num_rates_wrong, mean_rate);
+        RCLCPP_WARN(logger_, "[all] Motion capture rate off (#: %d, Avg: %.1f)", num_rates_wrong, mean_rate);
       }
     } else if (mocap_enabled_) {
       // b) warn if no data was received
-      RCLCPP_WARN(logger_, "Motion capture did not receive data!");
+      RCLCPP_WARN(logger_, "[all] Motion capture did not receive data!");
     }
 
     mocap_data_received_timepoints_.clear();
@@ -1250,7 +1418,7 @@ private:
   {
     const auto iter = name_to_id_.find(name);
     if (iter != name_to_id_.end()) {
-      RCLCPP_WARN(logger_, "At least two objects with the same id (%d, %s, %s)", id, name.c_str(), iter->first.c_str());
+      RCLCPP_WARN(logger_, "[all] At least two objects with the same id (%d, %s, %s)", id, name.c_str(), iter->first.c_str());
     } else {
       name_to_id_.insert(std::make_pair(name, id));
     }
@@ -1272,6 +1440,8 @@ private:
     rclcpp::Service<NotifySetpointsStop>::SharedPtr service_notify_setpoints_stop_;
 
     std::map<std::string, std::unique_ptr<CrazyflieROS>> crazyflies_;
+
+
 
     // broadcastUri -> broadcast object
     std::map<std::string, std::unique_ptr<CrazyflieBroadcaster>> broadcaster_;
